@@ -97,26 +97,11 @@ jobs:
             aws eks update-kubeconfig --name ${{ env.SAAS_EKS_CLUSTER_NAME }} --region ${{ inputs.region }}
           fi
             
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: 3.9
-      
-      - name: Install Python dependencies
-        run: |
-          pip install boto3 PyYAML
-
       - name: Sync librechat env variables
         env:
           AWS_REGION: ${{ inputs.region }}
           APP_NAME: ${{ inputs.application }}
         run: |
-          echo "Generating new librechat env YAML..."
-          python utils/generate_k8s_librechat_env.py
-
-          echo "Applying new env vars..."
-          kubectl apply -f kubernetes/jarvis_env_externalsecret.yaml -n ${{ inputs.application  }}
-
           echo "Updating env vars in EKS pods..."
           kubectl annotate es jarvis-env force-sync=$(date +%s) --overwrite -n ${{ inputs.application  }}
 
