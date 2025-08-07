@@ -103,11 +103,11 @@ jobs:
           APP_NAME: ${{ inputs.application }}
         run: |
           echo "Updating env vars in EKS pods..."
-          kubectl annotate es jarvis-env force-sync=$(date +%s) --overwrite -n ${{ inputs.application  }}
+          kubectl annotate es jarvis-env force-sync=$(date +%s) --overwrite -n ${{ inputs.application }}
 
       - name: Update llama index on EKS
         env:
-          image: ${{ needs.package_and_push.outputs.ecr_repo }}/jarvis/google_workspace_mcp:${{ github.sha }}
+          image: ${{ needs.package_and_push.outputs.ecr_repo }}/jarvis/google_workspace_mcp:latest
         run: kubectl set image deploy/google-workspace-mcp google-workspace-mcp=$image -n ${{ inputs.application  }}
 
 
