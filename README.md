@@ -7,13 +7,14 @@
 [![PyPI](https://img.shields.io/pypi/v/workspace-mcp.svg)](https://pypi.org/project/workspace-mcp/)
 [![PyPI Downloads](https://static.pepy.tech/badge/workspace-mcp/month)](https://pepy.tech/projects/workspace-mcp)
 [![Website](https://img.shields.io/badge/Website-workspacemcp.com-green.svg)](https://workspacemcp.com)
-[![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/eebbc4a6-0f8c-41b2-ace8-038e5516dba0)
-
-**The most feature-complete Google Workspace MCP server**, now with Remote OAuth2.1 multi-user support and 1-click Claude installation. 
 
 *Full natural language control over Google Calendar, Drive, Gmail, Docs, Sheets, Slides, Forms, Tasks, and Chat through all MCP clients, AI assistants and developer tools.*
 
-###### Support for all free Google accounts (Gmail, Docs, Drive etc) & Google Workspace plans (Starter, Standard, Plus, Enterprise, Non Profit etc) with their expanded app options like Chat & Spaces.
+**The most feature-complete Google Workspace MCP server**, now with Remote OAuth2.1 multi-user support and 1-click Claude installation.
+
+
+###### Support for all free Google accounts (Gmail, Docs, Drive etc) & Google Workspace plans (Starter, Standard, Plus, Enterprise, Non Profit) with expanded app options like Chat & Spaces. <br/> Interested in a private cloud instance? [Get in touch](https://workspacemcp.com/workspace-mcp-cloud)!
+
 
 </div>
 
@@ -42,14 +43,16 @@
 
 **This README was written with AI assistance, and here's why that matters**
 >
-> As a solo dev building open source tools that many never see outside use, comprehensive documentation often wouldn't happen without AI help. Using agentic dev tools like **Roo** & **Claude Code** that understand the entire codebase, AI doesn't just regurgitate generic content - it extracts real implementation details and creates accurate, specific documentation.
+> As a solo dev building open source tools, comprehensive documentation often wouldn't happen without AI help. Using agentic dev tools like **Roo** & **Claude Code** that understand the entire codebase, AI doesn't just regurgitate generic content - it extracts real implementation details and creates accurate, specific documentation.
 >
-> In this case, Sonnet 4 took a pass & a human (me) verified them 7/10/25.
+> In this case, Sonnet 4 took a pass & a human (me) verified them 8/9/25.
 </details>
 
 ## Overview
 
 A production-ready MCP server that integrates all major Google Workspace services with AI assistants. It supports both single-user operation and multi-user authentication via OAuth 2.1, making it a powerful backend for custom applications. Built with FastMCP for optimal performance, featuring advanced authentication handling, service caching, and streamlined development patterns.
+
+**Simplified Setup**: Now uses Google Desktop OAuth clients - no redirect URIs or port configuration needed!
 
 ## Features
 
@@ -57,7 +60,7 @@ A production-ready MCP server that integrates all major Google Workspace service
 - **📅 Google Calendar**: Full calendar management with event CRUD operations
 - **📁 Google Drive**: File operations with native Microsoft Office format support (.docx, .xlsx)
 - **📧 Gmail**: Complete email management with search, send, and draft capabilities
-- **📄 Google Docs**: Document operations including content extraction, creation, and comment management
+- **📄 Google Docs**: Complete document management including content extraction, creation, full editing capabilities, and comment management
 - **📊 Google Sheets**: Comprehensive spreadsheet management with flexible cell operations and comment management
 - **🖼️ Google Slides**: Presentation management with slide creation, updates, content manipulation, and comment management
 - **📝 Google Forms**: Form creation, retrieval, publish settings, and response management
@@ -66,7 +69,7 @@ A production-ready MCP server that integrates all major Google Workspace service
 - **🔍 Google Custom Search**: Programmable Search Engine (PSE) integration for custom web searches
 - **🔄 All Transports**: Stdio, Streamable HTTP & SSE, OpenAPI compatibility via `mcpo`
 - **⚡ High Performance**: Service caching, thread-safe sessions, FastMCP integration
-- **🧩 Developer Friendly**: Minimal boilerplate, automatic service injection, centralized configuration
+- **Developer Friendly**: Minimal boilerplate, automatic service injection, centralized configuration
 
 ---
 
@@ -114,12 +117,12 @@ Claude Desktop stores these securely in the OS keychain; set them once in the ex
 ### Configuration
 
 1. **Google Cloud Setup**:
-   - Create OAuth 2.0 credentials (web application) in [Google Cloud Console](https://console.cloud.google.com/)
+   - Create OAuth 2.0 credentials in [Google Cloud Console](https://console.cloud.google.com/)
    - Create a new project (or use an existing one) for your MCP server.
    - Navigate to APIs & Services → Credentials.
    - Click Create Credentials → OAuth Client ID.
-   - Choose Web Application as the application type.
-   - Add redirect URI: `http://localhost:8000/oauth2callback`
+   - **Choose Desktop Application as the application type** (simpler setup, no redirect URIs needed!)
+   - Download your credentials and note the Client ID and Client Secret
 
    - **Enable APIs**:
    - In the Google Cloud Console, go to APIs & Services → Library.
@@ -149,7 +152,7 @@ Claude Desktop stores these securely in the OS keychain; set them once in the ex
      ```bash
      export GOOGLE_OAUTH_CLIENT_ID="your-client-id.apps.googleusercontent.com"
      export GOOGLE_OAUTH_CLIENT_SECRET="your-client-secret"
-     export GOOGLE_OAUTH_REDIRECT_URI="http://localhost:8000/oauth2callback"  # Optional
+     export GOOGLE_OAUTH_REDIRECT_URI="http://localhost:8000/oauth2callback"  # Optional - see Reverse Proxy Setup below
      ```
 
      **Option B: File-based (Traditional)**
@@ -188,8 +191,9 @@ Claude Desktop stores these securely in the OS keychain; set them once in the ex
 
 3. **Server Configuration**:
    The server's base URL and port can be customized using environment variables:
-   - `WORKSPACE_MCP_BASE_URI`: Sets the base URI for the server (default: http://localhost). This affects the `server_url` used to construct the default `OAUTH_REDIRECT_URI` if `GOOGLE_OAUTH_REDIRECT_URI` is not set. Note: do not include a port in `WORKSPACE_MCP_BASE_URI` - set that with the variable below. 
-   - `WORKSPACE_MCP_PORT`: Sets the port the server listens on (default: 8000). This affects the server_url, port, and OAUTH_REDIRECT_URI.
+   - `WORKSPACE_MCP_BASE_URI`: Sets the base URI for the server (default: http://localhost). Note: do not include a port in `WORKSPACE_MCP_BASE_URI` - set that with the variable below.
+   - `WORKSPACE_MCP_PORT`: Sets the port the server listens on (default: 8000).
+   - `GOOGLE_OAUTH_REDIRECT_URI`: Override the OAuth redirect URI (useful for reverse proxy setups - see below).
    - `USER_GOOGLE_EMAIL`: Optional default email for authentication flows. If set, the LLM won't need to specify your email when calling `start_google_auth`.
 
 ### Google Custom Search Setup
@@ -277,6 +281,24 @@ This architecture enables any OAuth 2.1 compliant client to authenticate users t
 
 </details>
 
+**MCP Inspector**: No additional configuration needed with desktop OAuth client.
+
+**Claude Code Inspector**: No additional configuration needed with desktop OAuth client.
+
+### VS Code MCP Client Support
+**VS Code mcp.json Configuration Example**:
+
+```json
+{
+    "servers": {
+        "google-workspace": {
+            "url": "http://localhost:8000/mcp/",
+            "type": "http"
+        }
+    }
+}
+```
+
 ### Connect to Claude Desktop
 
 The server supports two transport modes:
@@ -333,18 +355,35 @@ uvx workspace-mcp --tools gmail drive calendar
 
 > Run instantly without manual installation - you must configure OAuth credentials when using uvx. You can use either environment variables (recommended for production) or set the `GOOGLE_CLIENT_SECRET_PATH` (or legacy `GOOGLE_CLIENT_SECRETS`) environment variable to point to your `client_secret.json` file.
 
-#### Custom Authentication Server
-> [!CAUTION]
-> - `GOOGLE_OAUTH_REDIRECT_URI`: *WARNING* - Do not use this unless you are planning to write your own separate OAuth Logic. This sets an override for OAuth redirect, must include a full address (i.e. include port if necessary).
-> - Only use this if you want to run your OAuth redirect separately from the MCP. This is not recommended outside of very specific cases and will break the MCP if set without you writing your own compatible auth logic. This is intended specifically for enterprise use cases where you may already have an existing auth proxy or gateway in place.
+#### Reverse Proxy Setup
+
+If you're running the MCP server behind a reverse proxy (nginx, Apache, Cloudflare, etc.), you'll need to configure `GOOGLE_OAUTH_REDIRECT_URI` to match your external URL:
+
+**Problem**: When behind a reverse proxy, the server constructs redirect URIs using internal ports (e.g., `http://localhost:8000/oauth2callback`) but Google expects the external URL (e.g., `https://your-domain.com/oauth2callback`).
+
+You also have options for:
+| `OAUTH_CUSTOM_REDIRECT_URIS` *(optional)* | Comma-separated list of additional redirect URIs |
+| `OAUTH_ALLOWED_ORIGINS` *(optional)* | Comma-separated list of additional CORS origins |
+
+**Solution**: Set `GOOGLE_OAUTH_REDIRECT_URI` to your external URL:
+
+```bash
+# External URL without port (nginx/Apache handling HTTPS)
+export GOOGLE_OAUTH_REDIRECT_URI="https://your-domain.com/oauth2callback"
+
+# Or with custom port if needed
+export GOOGLE_OAUTH_REDIRECT_URI="https://your-domain.com:8443/oauth2callback"
+```
+
+**Important**:
+- The redirect URI must exactly match what's configured in your Google Cloud Console
+- The server will use this value for all OAuth flows instead of constructing it from `WORKSPACE_MCP_BASE_URI` and `WORKSPACE_MCP_PORT`
+- Your reverse proxy must forward `/oauth2callback` requests to the MCP server
 
 ```bash
 # Set OAuth credentials via environment variables (recommended)
 export GOOGLE_OAUTH_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 export GOOGLE_OAUTH_CLIENT_SECRET="your-client-secret"
-
-# Start the server with all Google Workspace tools
-uvx workspace-mcp
 
 # Start with specific tools only
 uvx workspace-mcp --tools gmail drive calendar tasks
@@ -405,17 +444,18 @@ If you need to use HTTP mode with Claude Desktop:
 
 ### First-Time Authentication
 
-The server features **transport-aware OAuth callback handling**:
+The server uses **Google Desktop OAuth** for simplified authentication:
 
-- **Stdio Mode**: Automatically starts a minimal HTTP server on port 8000 for OAuth callbacks
-- **HTTP Mode**: Uses the existing FastAPI server for OAuth callbacks
-- **Same OAuth Flow**: Both modes use `http://localhost:8000/oauth2callback` for consistency
+- **No redirect URIs needed**: Desktop OAuth clients handle authentication without complex callback URLs
+- **Automatic flow**: The server manages the entire OAuth process transparently
+- **Transport-agnostic**: Works seamlessly in both stdio and HTTP modes
 
 When calling a tool:
 1. Server returns authorization URL
 2. Open URL in browser and authorize
-3. Server handles OAuth callback automatically (on port 8000 in both modes)
-4. Retry the original request
+3. Google provides an authorization code
+4. Paste the code when prompted (or it's handled automatically)
+5. Server completes authentication and retries your request
 
 ---
 
@@ -460,6 +500,13 @@ When calling a tool:
 | `get_doc_content` | Extract document text |
 | `list_docs_in_folder` | List docs in folder |
 | `create_doc` | Create new documents |
+| `update_doc_text` | Insert or replace text at specific positions |
+| `find_and_replace_doc` | Find and replace text throughout document |
+| `format_doc_text` | Apply text formatting (bold, italic, underline, fonts) |
+| `insert_doc_elements` | Add tables, lists, or page breaks |
+| `insert_doc_image` | Insert images from Drive or URLs |
+| `update_doc_headers_footers` | Modify document headers and footers |
+| `batch_update_doc` | Execute multiple document operations atomically |
 | `read_doc_comments` | Read all comments and replies |
 | `create_doc_comment` | Create new comments |
 | `reply_to_comment` | Reply to existing comments |
@@ -578,10 +625,10 @@ async def your_new_tool(service, param1: str, param2: int = 10):
 
 ## 🔒 Security
 
-- **Credentials**: Never commit `client_secret.json` or `.credentials/` directory
+- **Credentials**: Never commit `.env`, `client_secret.json` or the `.credentials/` directory to source control!
 - **OAuth Callback**: Uses `http://localhost:8000/oauth2callback` for development (requires `OAUTHLIB_INSECURE_TRANSPORT=1`)
 - **Transport-Aware Callbacks**: Stdio mode starts a minimal HTTP server only for OAuth, ensuring callbacks work in all modes
-- **Production**: Use HTTPS for callback URIs and configure accordingly
+- **Production**: Use HTTPS & OAuth 2.1 and configure accordingly
 - **Network Exposure**: Consider authentication when using `mcpo` over networks
 - **Scope Minimization**: Tools request only necessary permissions
 
@@ -640,6 +687,11 @@ The Google Workspace tools should now be available when interacting with models 
 MIT License - see `LICENSE` file for details.
 
 ---
+
+Validations:
+[![MCP Badge](https://lobehub.com/badge/mcp/taylorwilsdon-google_workspace_mcp)](https://lobehub.com/mcp/taylorwilsdon-google_workspace_mcp)
+[![Verified on MseeP](https://mseep.ai/badge.svg)](https://mseep.ai/app/eebbc4a6-0f8c-41b2-ace8-038e5516dba0)
+
 
 <div align="center">
 <img width="810" alt="Gmail Integration" src="https://github.com/user-attachments/assets/656cea40-1f66-40c1-b94c-5a2c900c969d" />
