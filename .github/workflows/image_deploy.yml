@@ -107,7 +107,7 @@ jobs:
 
       - name: Update llama index on EKS
         env:
-          image: ${{ needs.package_and_push.outputs.ecr_repo }}/jarvis/google_workspace_mcp:latest
+          image: ${{ steps.login-ecr.outputs.registry }}/jarvis/google_workspace_mcp:latest
         run: kubectl set image deploy/google-workspace-mcp google-workspace-mcp=$image -n ${{ inputs.application  }}
 
 
