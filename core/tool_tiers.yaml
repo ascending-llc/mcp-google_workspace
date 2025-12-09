@@ -24,7 +24,6 @@ drive:
     - create_drive_file
   extended:
     - list_drive_items
-    - update_drive_file
   complete:
     - get_drive_file_permissions
     - check_drive_file_public_access
