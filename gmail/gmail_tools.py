@@ -8,6 +8,7 @@ import logging
 import asyncio
 import base64
 import ssl
+from html.parser import HTMLParser
 from typing import Optional, List, Dict, Literal, Any
 
 from email.mime.text import MIMEText
@@ -30,6 +31,40 @@ logger = logging.getLogger(__name__)
 GMAIL_BATCH_SIZE = 25
 GMAIL_REQUEST_DELAY = 0.1
 HTML_BODY_TRUNCATE_LIMIT = 20000
+GMAIL_METADATA_HEADERS = ["Subject", "From", "To", "Cc", "Message-ID", "Date"]
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Extract readable text from HTML using stdlib."""
+
+    def __init__(self):
+        super().__init__()
+        self._text = []
+        self._skip = False
+
+    def handle_starttag(self, tag, attrs):
+        self._skip = tag in ("script", "style")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self._skip = False
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._text.append(data)
+
+    def get_text(self) -> str:
+        return " ".join("".join(self._text).split())
+
+
+def _html_to_text(html: str) -> str:
+    """Convert HTML to readable plain text."""
+    try:
+        parser = _HTMLTextExtractor()
+        parser.feed(html)
+        return parser.get_text()
+    except Exception:
+        return html
 
 
 def _extract_message_body(payload):
@@ -69,7 +104,9 @@ def _extract_message_bodies(payload):
 
         if body_data:
             try:
-                decoded_data = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="ignore")
+                decoded_data = base64.urlsafe_b64decode(body_data).decode(
+                    "utf-8", errors="ignore"
+                )
                 if mime_type == "text/plain" and not text_body:
                     text_body = decoded_data
                 elif mime_type == "text/html" and not html_body:
@@ -84,7 +121,9 @@ def _extract_message_bodies(payload):
     # Check the main payload if it has body data directly
     if payload.get("body", {}).get("data"):
         try:
-            decoded_data = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="ignore")
+            decoded_data = base64.urlsafe_b64decode(payload["body"]["data"]).decode(
+                "utf-8", errors="ignore"
+            )
             mime_type = payload.get("mimeType", "")
             if mime_type == "text/plain" and not text_body:
                 text_body = decoded_data
@@ -93,15 +132,13 @@ def _extract_message_bodies(payload):
         except Exception as e:
             logger.warning(f"Failed to decode main payload body: {e}")
 
-    return {
-        "text": text_body,
-        "html": html_body
-    }
+    return {"text": text_body, "html": html_body}
 
 
 def _format_body_content(text_body: str, html_body: str) -> str:
     """
     Helper function to format message body content with HTML fallback and truncation.
+    Detects useless text/plain fallbacks (e.g., "Your client does not support HTML").
 
     Args:
         text_body: Plain text body content
@@ -110,13 +147,23 @@ def _format_body_content(text_body: str, html_body: str) -> str:
     Returns:
         Formatted body content string
     """
-    if text_body.strip():
+    text_stripped = text_body.strip()
+    html_stripped = html_body.strip()
+
+    # Detect useless fallback: HTML comments in text, or HTML is 50x+ longer
+    use_html = html_stripped and (
+        not text_stripped
+        or "<!--" in text_stripped
+        or len(html_stripped) > len(text_stripped) * 50
+    )
+
+    if use_html:
+        content = _html_to_text(html_stripped)
+        if len(content) > HTML_BODY_TRUNCATE_LIMIT:
+            content = content[:HTML_BODY_TRUNCATE_LIMIT] + "\n\n[Content truncated...]"
+        return content
+    elif text_stripped:
         return text_body
-    elif html_body.strip():
-        # Truncate very large HTML to keep responses manageable
-        if len(html_body) > HTML_BODY_TRUNCATE_LIMIT:
-            html_body = html_body[:HTML_BODY_TRUNCATE_LIMIT] + "\n\n[HTML content truncated...]"
-        return f"[HTML Content Converted]\n{html_body}"
     else:
         return "[No readable content found]"
 
@@ -137,12 +184,14 @@ def _extract_attachments(payload: dict) -> List[Dict[str, Any]]:
         """Recursively search for attachments in message parts"""
         # Check if this part is an attachment
         if part.get("filename") and part.get("body", {}).get("attachmentId"):
-            attachments.append({
-                "filename": part["filename"],
-                "mimeType": part.get("mimeType", "application/octet-stream"),
-                "size": part.get("body", {}).get("size", 0),
-                "attachmentId": part["body"]["attachmentId"]
-            })
+            attachments.append(
+                {
+                    "filename": part["filename"],
+                    "mimeType": part.get("mimeType", "application/octet-stream"),
+                    "size": part.get("body", {}).get("size", 0),
+                    "attachmentId": part["body"]["attachmentId"],
+                }
+            )
 
         # Recursively search sub-parts
         if "parts" in part:
@@ -166,9 +215,12 @@ def _extract_headers(payload: dict, header_names: List[str]) -> Dict[str, str]:
         Dict mapping header names to their values
     """
     headers = {}
+    target_headers = {name.lower(): name for name in header_names}
     for header in payload.get("headers", []):
-        if header["name"] in header_names:
-            headers[header["name"]] = header["value"]
+        header_name_lower = header["name"].lower()
+        if header_name_lower in target_headers:
+            # Store using the original requested casing
+            headers[target_headers[header_name_lower]] = header["value"]
     return headers
 
 
@@ -204,7 +256,7 @@ def _prepare_gmail_message(
     """
     # Handle reply subject formatting
     reply_subject = subject
-    if in_reply_to and not subject.lower().startswith('re:'):
+    if in_reply_to and not subject.lower().startswith("re:"):
         reply_subject = f"Re: {subject}"
 
     # Prepare the email
@@ -255,7 +307,9 @@ def _generate_gmail_web_url(item_id: str, account_index: int = 0) -> str:
     return f"https://mail.google.com/mail/u/{account_index}/#all/{item_id}"
 
 
-def _format_gmail_results_plain(messages: list, query: str) -> str:
+def _format_gmail_results_plain(
+    messages: list, query: str, next_page_token: Optional[str] = None
+) -> str:
     """Format Gmail search results in clean, LLM-friendly plain text."""
     if not messages:
         return f"No messages found for query: '{query}'"
@@ -269,11 +323,13 @@ def _format_gmail_results_plain(messages: list, query: str) -> str:
     for i, msg in enumerate(messages, 1):
         # Handle potential null/undefined message objects
         if not msg or not isinstance(msg, dict):
-            lines.extend([
-                f"  {i}. Message: Invalid message data",
-                "     Error: Message object is null or malformed",
-                "",
-            ])
+            lines.extend(
+                [
+                    f"  {i}. Message: Invalid message data",
+                    "     Error: Message object is null or malformed",
+                    "",
+                ]
+            )
             continue
 
         # Handle potential null/undefined values from Gmail API
@@ -315,6 +371,13 @@ def _format_gmail_results_plain(messages: list, query: str) -> str:
         ]
     )
 
+    # Add pagination info if there's a next page
+    if next_page_token:
+        lines.append("")
+        lines.append(
+            f"📄 PAGINATION: To get the next page, call search_gmail_messages again with page_token='{next_page_token}'"
+        )
+
     return "\n".join(lines)
 
 
@@ -322,29 +385,41 @@ def _format_gmail_results_plain(messages: list, query: str) -> str:
 @handle_http_errors("search_gmail_messages", is_read_only=True, service_type="gmail")
 @require_google_service("gmail", "gmail_read")
 async def search_gmail_messages(
-    service, query: str, user_google_email: str, page_size: int = 10
+    service,
+    query: str,
+    user_google_email: str,
+    page_size: int = 10,
+    page_token: Optional[str] = None,
 ) -> str:
     """
     Searches messages in a user's Gmail account based on a query.
     Returns both Message IDs and Thread IDs for each found message, along with Gmail web interface links for manual verification.
+    Supports pagination via page_token parameter.
 
     Args:
         query (str): The search query. Supports standard Gmail search operators.
         user_google_email (str): The user's Google email address. Required.
         page_size (int): The maximum number of messages to return. Defaults to 10.
+        page_token (Optional[str]): Token for retrieving the next page of results. Use the next_page_token from a previous response.
 
     Returns:
         str: LLM-friendly structured results with Message IDs, Thread IDs, and clickable Gmail web interface URLs for each found message.
+        Includes pagination token if more results are available.
     """
     logger.info(
-        f"[search_gmail_messages] Email: '{user_google_email}', Query: '{query}'"
+        f"[search_gmail_messages] Email: '{user_google_email}', Query: '{query}', Page size: {page_size}"
     )
 
+    # Build the API request parameters
+    request_params = {"userId": "me", "q": query, "maxResults": page_size}
+
+    # Add page token if provided
+    if page_token:
+        request_params["pageToken"] = page_token
+        logger.info("[search_gmail_messages] Using page_token for pagination")
+
     response = await asyncio.to_thread(
-        service.users()
-        .messages()
-        .list(userId="me", q=query, maxResults=page_size)
-        .execute
+        service.users().messages().list(**request_params).execute
     )
 
     # Handle potential null response (but empty dict {} is valid)
@@ -357,14 +432,23 @@ async def search_gmail_messages(
     if messages is None:
         messages = []
 
-    formatted_output = _format_gmail_results_plain(messages, query)
+    # Extract next page token for pagination
+    next_page_token = response.get("nextPageToken")
+
+    formatted_output = _format_gmail_results_plain(messages, query, next_page_token)
 
     logger.info(f"[search_gmail_messages] Found {len(messages)} messages")
+    if next_page_token:
+        logger.info(
+            "[search_gmail_messages] More results available (next_page_token present)"
+        )
     return formatted_output
 
 
 @server.tool()
-@handle_http_errors("get_gmail_message_content", is_read_only=True, service_type="gmail")
+@handle_http_errors(
+    "get_gmail_message_content", is_read_only=True, service_type="gmail"
+)
 @require_google_service("gmail", "gmail_read")
 async def get_gmail_message_content(
     service, message_id: str, user_google_email: str
@@ -377,7 +461,7 @@ async def get_gmail_message_content(
         user_google_email (str): The user's Google email address. Required.
 
     Returns:
-        str: The message details including subject, sender, recipients (To, Cc), and body content.
+        str: The message details including subject, sender, date, Message-ID, recipients (To, Cc), and body content.
     """
     logger.info(
         f"[get_gmail_message_content] Invoked. Message ID: '{message_id}', Email: '{user_google_email}'"
@@ -393,19 +477,19 @@ async def get_gmail_message_content(
             userId="me",
             id=message_id,
             format="metadata",
-            metadataHeaders=["Subject", "From", "To", "Cc"],
+            metadataHeaders=GMAIL_METADATA_HEADERS,
         )
         .execute
     )
 
-    headers = {
-        h["name"]: h["value"]
-        for h in message_metadata.get("payload", {}).get("headers", [])
-    }
+    headers = _extract_headers(
+        message_metadata.get("payload", {}), GMAIL_METADATA_HEADERS
+    )
     subject = headers.get("Subject", "(no subject)")
     sender = headers.get("From", "(unknown sender)")
     to = headers.get("To", "")
     cc = headers.get("Cc", "")
+    rfc822_msg_id = headers.get("Message-ID", "")
 
     # Now fetch the full message to get the body parts
     message_full = await asyncio.to_thread(
@@ -434,7 +518,11 @@ async def get_gmail_message_content(
     content_lines = [
         f"Subject: {subject}",
         f"From:    {sender}",
+        f"Date:    {headers.get('Date', '(unknown date)')}",
     ]
+
+    if rfc822_msg_id:
+        content_lines.append(f"Message-ID: {rfc822_msg_id}")
 
     if to:
         content_lines.append(f"To:      {to}")
@@ -447,7 +535,7 @@ async def get_gmail_message_content(
     if attachments:
         content_lines.append("\n--- ATTACHMENTS ---")
         for i, att in enumerate(attachments, 1):
-            size_kb = att['size'] / 1024
+            size_kb = att["size"] / 1024
             content_lines.append(
                 f"{i}. {att['filename']} ({att['mimeType']}, {size_kb:.1f} KB)\n"
                 f"   Attachment ID: {att['attachmentId']}\n"
@@ -458,7 +546,9 @@ async def get_gmail_message_content(
 
 
 @server.tool()
-@handle_http_errors("get_gmail_messages_content_batch", is_read_only=True, service_type="gmail")
+@handle_http_errors(
+    "get_gmail_messages_content_batch", is_read_only=True, service_type="gmail"
+)
 @require_google_service("gmail", "gmail_read")
 async def get_gmail_messages_content_batch(
     service,
@@ -476,7 +566,7 @@ async def get_gmail_messages_content_batch(
         format (Literal["full", "metadata"]): Message format. "full" includes body, "metadata" only headers.
 
     Returns:
-        str: A formatted list of message contents including subject, sender, recipients (To, Cc), and body (if full format).
+        str: A formatted list of message contents including subject, sender, date, Message-ID, recipients (To, Cc), and body (if full format).
     """
     logger.info(
         f"[get_gmail_messages_content_batch] Invoked. Message count: {len(message_ids)}, Email: '{user_google_email}'"
@@ -509,7 +599,7 @@ async def get_gmail_messages_content_batch(
                             userId="me",
                             id=mid,
                             format="metadata",
-                            metadataHeaders=["Subject", "From", "To", "Cc"],
+                            metadataHeaders=GMAIL_METADATA_HEADERS,
                         )
                     )
                 else:
@@ -541,7 +631,7 @@ async def get_gmail_messages_content_batch(
                                     userId="me",
                                     id=mid,
                                     format="metadata",
-                                    metadataHeaders=["Subject", "From", "To", "Cc"],
+                                    metadataHeaders=GMAIL_METADATA_HEADERS,
                                 )
                                 .execute
                             )
@@ -556,7 +646,7 @@ async def get_gmail_messages_content_batch(
                     except ssl.SSLError as ssl_error:
                         if attempt < max_retries - 1:
                             # Exponential backoff: 1s, 2s, 4s
-                            delay = 2 ** attempt
+                            delay = 2**attempt
                             logger.warning(
                                 f"[get_gmail_messages_content_batch] SSL error for message {mid} on attempt {attempt + 1}: {ssl_error}. Retrying in {delay}s..."
                             )
@@ -592,13 +682,20 @@ async def get_gmail_messages_content_batch(
                 payload = message.get("payload", {})
 
                 if format == "metadata":
-                    headers = _extract_headers(payload, ["Subject", "From", "To", "Cc"])
+                    headers = _extract_headers(payload, GMAIL_METADATA_HEADERS)
                     subject = headers.get("Subject", "(no subject)")
                     sender = headers.get("From", "(unknown sender)")
                     to = headers.get("To", "")
                     cc = headers.get("Cc", "")
+                    rfc822_msg_id = headers.get("Message-ID", "")
 
-                    msg_output = f"Message ID: {mid}\nSubject: {subject}\nFrom: {sender}\n"
+                    msg_output = (
+                        f"Message ID: {mid}\nSubject: {subject}\nFrom: {sender}\n"
+                        f"Date: {headers.get('Date', '(unknown date)')}\n"
+                    )
+                    if rfc822_msg_id:
+                        msg_output += f"Message-ID: {rfc822_msg_id}\n"
+
                     if to:
                         msg_output += f"To: {to}\n"
                     if cc:
@@ -608,11 +705,12 @@ async def get_gmail_messages_content_batch(
                     output_messages.append(msg_output)
                 else:
                     # Full format - extract body too
-                    headers = _extract_headers(payload, ["Subject", "From", "To", "Cc"])
+                    headers = _extract_headers(payload, GMAIL_METADATA_HEADERS)
                     subject = headers.get("Subject", "(no subject)")
                     sender = headers.get("From", "(unknown sender)")
                     to = headers.get("To", "")
                     cc = headers.get("Cc", "")
+                    rfc822_msg_id = headers.get("Message-ID", "")
 
                     # Extract both text and HTML bodies using enhanced helper function
                     bodies = _extract_message_bodies(payload)
@@ -622,12 +720,20 @@ async def get_gmail_messages_content_batch(
                     # Format body content with HTML fallback
                     body_data = _format_body_content(text_body, html_body)
 
-                    msg_output = f"Message ID: {mid}\nSubject: {subject}\nFrom: {sender}\n"
+                    msg_output = (
+                        f"Message ID: {mid}\nSubject: {subject}\nFrom: {sender}\n"
+                        f"Date: {headers.get('Date', '(unknown date)')}\n"
+                    )
+                    if rfc822_msg_id:
+                        msg_output += f"Message-ID: {rfc822_msg_id}\n"
+
                     if to:
                         msg_output += f"To: {to}\n"
                     if cc:
                         msg_output += f"Cc: {cc}\n"
-                    msg_output += f"Web Link: {_generate_gmail_web_url(mid)}\n\n{body_data}\n"
+                    msg_output += (
+                        f"Web Link: {_generate_gmail_web_url(mid)}\n\n{body_data}\n"
+                    )
 
                     output_messages.append(msg_output)
 
@@ -639,7 +745,9 @@ async def get_gmail_messages_content_batch(
 
 
 @server.tool()
-@handle_http_errors("get_gmail_attachment_content", is_read_only=True, service_type="gmail")
+@handle_http_errors(
+    "get_gmail_attachment_content", is_read_only=True, service_type="gmail"
+)
 @require_google_service("gmail", "gmail_read")
 async def get_gmail_attachment_content(
     service,
@@ -678,7 +786,9 @@ async def get_gmail_attachment_content(
             .execute
         )
     except Exception as e:
-        logger.error(f"[get_gmail_attachment_content] Failed to download attachment: {e}")
+        logger.error(
+            f"[get_gmail_attachment_content] Failed to download attachment: {e}"
+        )
         return (
             f"Error: Failed to download attachment. The attachment ID may have changed.\n"
             f"Please fetch the message content again to get an updated attachment ID.\n\n"
@@ -686,22 +796,99 @@ async def get_gmail_attachment_content(
         )
 
     # Format response with attachment data
-    size_bytes = attachment.get('size', 0)
+    size_bytes = attachment.get("size", 0)
     size_kb = size_bytes / 1024 if size_bytes else 0
+    base64_data = attachment.get("data", "")
 
-    result_lines = [
-        "Attachment downloaded successfully!",
-        f"Message ID: {message_id}",
-        f"Size: {size_kb:.1f} KB ({size_bytes} bytes)",
-        "\nBase64-encoded content (first 100 characters shown):",
-        f"{attachment['data'][:100]}...",
-        "\n\nThe full base64-encoded attachment data is available.",
-        "To save: decode the base64 data and write to a file with the appropriate extension.",
-        "\nNote: Attachment IDs are ephemeral. Always use IDs from the most recent message fetch."
-    ]
+    # Check if we're in stateless mode (can't save files)
+    from auth.oauth_config import is_stateless_mode
 
-    logger.info(f"[get_gmail_attachment_content] Successfully downloaded {size_kb:.1f} KB attachment")
-    return "\n".join(result_lines)
+    if is_stateless_mode():
+        result_lines = [
+            "Attachment downloaded successfully!",
+            f"Message ID: {message_id}",
+            f"Size: {size_kb:.1f} KB ({size_bytes} bytes)",
+            "\n⚠️ Stateless mode: File storage disabled.",
+            "\nBase64-encoded content (first 100 characters shown):",
+            f"{base64_data[:100]}...",
+            "\nNote: Attachment IDs are ephemeral. Always use IDs from the most recent message fetch.",
+        ]
+        logger.info(
+            f"[get_gmail_attachment_content] Successfully downloaded {size_kb:.1f} KB attachment (stateless mode)"
+        )
+        return "\n".join(result_lines)
+
+    # Save attachment and generate URL
+    try:
+        from core.attachment_storage import get_attachment_storage, get_attachment_url
+
+        storage = get_attachment_storage()
+
+        # Try to get filename and mime type from message (optional - attachment IDs are ephemeral)
+        filename = None
+        mime_type = None
+        try:
+            # Quick metadata fetch to try to get attachment info
+            # Note: This might fail if attachment IDs changed, but worth trying
+            message_metadata = await asyncio.to_thread(
+                service.users()
+                .messages()
+                .get(userId="me", id=message_id, format="metadata")
+                .execute
+            )
+            payload = message_metadata.get("payload", {})
+            attachments = _extract_attachments(payload)
+            for att in attachments:
+                if att.get("attachmentId") == attachment_id:
+                    filename = att.get("filename")
+                    mime_type = att.get("mimeType")
+                    break
+        except Exception:
+            # If we can't get metadata, use defaults
+            logger.debug(
+                f"Could not fetch attachment metadata for {attachment_id}, using defaults"
+            )
+
+        # Save attachment
+        file_id = storage.save_attachment(
+            base64_data=base64_data, filename=filename, mime_type=mime_type
+        )
+
+        # Generate URL
+        attachment_url = get_attachment_url(file_id)
+
+        result_lines = [
+            "Attachment downloaded successfully!",
+            f"Message ID: {message_id}",
+            f"Size: {size_kb:.1f} KB ({size_bytes} bytes)",
+            f"\n📎 Download URL: {attachment_url}",
+            "\nThe attachment has been saved and is available at the URL above.",
+            "The file will expire after 1 hour.",
+            "\nNote: Attachment IDs are ephemeral. Always use IDs from the most recent message fetch.",
+        ]
+
+        logger.info(
+            f"[get_gmail_attachment_content] Successfully saved {size_kb:.1f} KB attachment as {file_id}"
+        )
+        return "\n".join(result_lines)
+
+    except Exception as e:
+        logger.error(
+            f"[get_gmail_attachment_content] Failed to save attachment: {e}",
+            exc_info=True,
+        )
+        # Fallback to showing base64 preview
+        result_lines = [
+            "Attachment downloaded successfully!",
+            f"Message ID: {message_id}",
+            f"Size: {size_kb:.1f} KB ({size_bytes} bytes)",
+            "\n⚠️ Failed to save attachment file. Showing preview instead.",
+            "\nBase64-encoded content (first 100 characters shown):",
+            f"{base64_data[:100]}...",
+            f"\nError: {str(e)}",
+            "\nNote: Attachment IDs are ephemeral. Always use IDs from the most recent message fetch.",
+        ]
+        return "\n".join(result_lines)
 
 
 @server.tool()
@@ -714,16 +901,28 @@ async def send_gmail_message(
     subject: str = Body(..., description="Email subject."),
     body: str = Body(..., description="Email body content (plain text or HTML)."),
     body_format: Literal["plain", "html"] = Body(
-        "plain", description="Email body format. Use 'plain' for plaintext or 'html' for HTML content."
+        "plain",
+        description="Email body format. Use 'plain' for plaintext or 'html' for HTML content.",
     ),
     cc: Optional[str] = Body(None, description="Optional CC email address."),
     bcc: Optional[str] = Body(None, description="Optional BCC email address."),
-    thread_id: Optional[str] = Body(None, description="Optional Gmail thread ID to reply within."),
-    in_reply_to: Optional[str] = Body(None, description="Optional Message-ID of the message being replied to."),
-    references: Optional[str] = Body(None, description="Optional chain of Message-IDs for proper threading."),
+    from_email: Optional[str] = Body(
+        None,
+        description="Optional 'Send As' alias email address. Must be configured in Gmail settings (Settings > Accounts > Send mail as). If not provided, uses the authenticated user's email.",
+    ),
+    thread_id: Optional[str] = Body(
+        None, description="Optional Gmail thread ID to reply within."
+    ),
+    in_reply_to: Optional[str] = Body(
+        None, description="Optional Message-ID of the message being replied to."
+    ),
+    references: Optional[str] = Body(
+        None, description="Optional chain of Message-IDs for proper threading."
+    ),
 ) -> str:
     """
     Sends an email using the user's Gmail account. Supports both new emails and replies.
+    Supports Gmail's "Send As" feature to send from configured alias addresses.
 
     Args:
         to (str): Recipient email address.
@@ -732,7 +931,10 @@ async def send_gmail_message(
         body_format (Literal['plain', 'html']): Email body format. Defaults to 'plain'.
         cc (Optional[str]): Optional CC email address.
         bcc (Optional[str]): Optional BCC email address.
-        user_google_email (str): The user's Google email address. Required.
+        from_email (Optional[str]): Optional 'Send As' alias email address. The alias must be
+            configured in Gmail settings (Settings > Accounts > Send mail as). If not provided,
+            the email will be sent from the authenticated user's primary email address.
+        user_google_email (str): The user's Google email address. Required for authentication.
         thread_id (Optional[str]): Optional Gmail thread ID to reply within. When provided, sends a reply.
         in_reply_to (Optional[str]): Optional Message-ID of the message being replied to. Used for proper threading.
         references (Optional[str]): Optional chain of Message-IDs for proper threading. Should include all previous Message-IDs.
@@ -750,6 +952,14 @@ async def send_gmail_message(
             subject="Hello",
             body="<strong>Hi there!</strong>",
             body_format="html"
+        )
+
+        # Send from a configured alias (Send As)
+        send_gmail_message(
+            to="user@example.com",
+            subject="Business Inquiry",
+            body="Hello from my business address...",
+            from_email="business@mydomain.com"
         )
 
         # Send an email with CC and BCC
@@ -776,6 +986,8 @@ async def send_gmail_message(
     )
 
     # Prepare the email message
+    # Use from_email (Send As alias) if provided, otherwise default to authenticated user
+    sender_email = from_email or user_google_email
     raw_message, thread_id_final = _prepare_gmail_message(
         subject=subject,
         body=body,
@@ -786,7 +998,7 @@ async def send_gmail_message(
         in_reply_to=in_reply_to,
         references=references,
         body_format=body_format,
-        from_email=user_google_email,
+        from_email=sender_email,
     )
 
     send_body = {"raw": raw_message}
@@ -812,26 +1024,41 @@ async def draft_gmail_message(
     subject: str = Body(..., description="Email subject."),
     body: str = Body(..., description="Email body (plain text)."),
     body_format: Literal["plain", "html"] = Body(
-        "plain", description="Email body format. Use 'plain' for plaintext or 'html' for HTML content."
+        "plain",
+        description="Email body format. Use 'plain' for plaintext or 'html' for HTML content.",
     ),
     to: Optional[str] = Body(None, description="Optional recipient email address."),
     cc: Optional[str] = Body(None, description="Optional CC email address."),
     bcc: Optional[str] = Body(None, description="Optional BCC email address."),
-    thread_id: Optional[str] = Body(None, description="Optional Gmail thread ID to reply within."),
-    in_reply_to: Optional[str] = Body(None, description="Optional Message-ID of the message being replied to."),
-    references: Optional[str] = Body(None, description="Optional chain of Message-IDs for proper threading."),
+    from_email: Optional[str] = Body(
+        None,
+        description="Optional 'Send As' alias email address. Must be configured in Gmail settings (Settings > Accounts > Send mail as). If not provided, uses the authenticated user's email.",
+    ),
+    thread_id: Optional[str] = Body(
+        None, description="Optional Gmail thread ID to reply within."
+    ),
+    in_reply_to: Optional[str] = Body(
+        None, description="Optional Message-ID of the message being replied to."
+    ),
+    references: Optional[str] = Body(
+        None, description="Optional chain of Message-IDs for proper threading."
+    ),
 ) -> str:
     """
     Creates a draft email in the user's Gmail account. Supports both new drafts and reply drafts.
+    Supports Gmail's "Send As" feature to draft from configured alias addresses.
 
     Args:
-        user_google_email (str): The user's Google email address. Required.
+        user_google_email (str): The user's Google email address. Required for authentication.
         subject (str): Email subject.
         body (str): Email body (plain text).
         body_format (Literal['plain', 'html']): Email body format. Defaults to 'plain'.
         to (Optional[str]): Optional recipient email address. Can be left empty for drafts.
         cc (Optional[str]): Optional CC email address.
         bcc (Optional[str]): Optional BCC email address.
+        from_email (Optional[str]): Optional 'Send As' alias email address. The alias must be
+            configured in Gmail settings (Settings > Accounts > Send mail as). If not provided,
+            the draft will be from the authenticated user's primary email address.
         thread_id (Optional[str]): Optional Gmail thread ID to reply within. When provided, creates a reply draft.
         in_reply_to (Optional[str]): Optional Message-ID of the message being replied to. Used for proper threading.
         references (Optional[str]): Optional chain of Message-IDs for proper threading. Should include all previous Message-IDs.
@@ -842,6 +1069,14 @@ async def draft_gmail_message(
     Examples:
         # Create a new draft
         draft_gmail_message(subject="Hello", body="Hi there!", to="user@example.com")
+
+        # Create a draft from a configured alias (Send As)
+        draft_gmail_message(
+            subject="Business Inquiry",
+            body="Hello from my business address...",
+            to="user@example.com",
+            from_email="business@mydomain.com"
+        )
 
         # Create a plaintext draft with CC and BCC
         draft_gmail_message(
@@ -876,7 +1111,7 @@ async def draft_gmail_message(
         draft_gmail_message(
             subject="Re: Meeting tomorrow",
             body="<strong>Thanks for the update!</strong>",
-            body_format="html,
+            body_format="html",
             to="user@example.com",
             thread_id="thread_123",
             in_reply_to="<message123@gmail.com>",
@@ -888,6 +1123,8 @@ async def draft_gmail_message(
     )
 
     # Prepare the email message
+    # Use from_email (Send As alias) if provided, otherwise default to authenticated user
+    sender_email = from_email or user_google_email
     raw_message, thread_id_final = _prepare_gmail_message(
         subject=subject,
         body=body,
@@ -898,7 +1135,7 @@ async def draft_gmail_message(
         thread_id=thread_id,
         in_reply_to=in_reply_to,
         references=references,
-        from_email=user_google_email,
+        from_email=sender_email,
     )
 
     # Create a draft instead of sending
@@ -1021,7 +1258,9 @@ async def get_gmail_thread_content(
 
 @server.tool()
 @require_google_service("gmail", "gmail_read")
-@handle_http_errors("get_gmail_threads_content_batch", is_read_only=True, service_type="gmail")
+@handle_http_errors(
+    "get_gmail_threads_content_batch", is_read_only=True, service_type="gmail"
+)
 async def get_gmail_threads_content_batch(
     service,
     thread_ids: List[str],
@@ -1087,7 +1326,7 @@ async def get_gmail_threads_content_batch(
                     except ssl.SSLError as ssl_error:
                         if attempt < max_retries - 1:
                             # Exponential backoff: 1s, 2s, 4s
-                            delay = 2 ** attempt
+                            delay = 2**attempt
                             logger.warning(
                                 f"[get_gmail_threads_content_batch] SSL error for thread {tid} on attempt {attempt + 1}: {ssl_error}. Retrying in {delay}s..."
                             )
@@ -1254,14 +1493,175 @@ async def manage_gmail_label(
 
 
 @server.tool()
+@handle_http_errors("list_gmail_filters", is_read_only=True, service_type="gmail")
+@require_google_service("gmail", "gmail_settings_basic")
+async def list_gmail_filters(service, user_google_email: str) -> str:
+    """
+    Lists all Gmail filters configured in the user's mailbox.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+
+    Returns:
+        str: A formatted list of filters with their criteria and actions.
+    """
+    logger.info(f"[list_gmail_filters] Invoked. Email: '{user_google_email}'")
+
+    response = await asyncio.to_thread(
+        service.users().settings().filters().list(userId="me").execute
+    )
+
+    filters = response.get("filter") or response.get("filters") or []
+
+    if not filters:
+        return "No filters found."
+
+    lines = [f"Found {len(filters)} filters:", ""]
+
+    for filter_obj in filters:
+        filter_id = filter_obj.get("id", "(no id)")
+        criteria = filter_obj.get("criteria", {})
+        action = filter_obj.get("action", {})
+
+        lines.append(f"🔹 Filter ID: {filter_id}")
+        lines.append("  Criteria:")
+
+        criteria_lines = []
+        if criteria.get("from"):
+            criteria_lines.append(f"From: {criteria['from']}")
+        if criteria.get("to"):
+            criteria_lines.append(f"To: {criteria['to']}")
+        if criteria.get("subject"):
+            criteria_lines.append(f"Subject: {criteria['subject']}")
+        if criteria.get("query"):
+            criteria_lines.append(f"Query: {criteria['query']}")
+        if criteria.get("negatedQuery"):
+            criteria_lines.append(f"Exclude Query: {criteria['negatedQuery']}")
+        if criteria.get("hasAttachment"):
+            criteria_lines.append("Has attachment")
+        if criteria.get("excludeChats"):
+            criteria_lines.append("Exclude chats")
+        if criteria.get("size"):
+            comparison = criteria.get("sizeComparison", "")
+            criteria_lines.append(
+                f"Size {comparison or ''} {criteria['size']} bytes".strip()
+            )
+
+        if not criteria_lines:
+            criteria_lines.append("(none)")
+
+        lines.extend([f"    • {line}" for line in criteria_lines])
+
+        lines.append("  Actions:")
+        action_lines = []
+        if action.get("forward"):
+            action_lines.append(f"Forward to: {action['forward']}")
+        if action.get("removeLabelIds"):
+            action_lines.append(f"Remove labels: {', '.join(action['removeLabelIds'])}")
+        if action.get("addLabelIds"):
+            action_lines.append(f"Add labels: {', '.join(action['addLabelIds'])}")
+
+        if not action_lines:
+            action_lines.append("(none)")
+
+        lines.extend([f"    • {line}" for line in action_lines])
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+@server.tool()
+@handle_http_errors("create_gmail_filter", service_type="gmail")
+@require_google_service("gmail", "gmail_settings_basic")
+async def create_gmail_filter(
+    service,
+    user_google_email: str,
+    criteria: Dict[str, Any] = Body(
+        ..., description="Filter criteria object as defined in the Gmail API."
+    ),
+    action: Dict[str, Any] = Body(
+        ..., description="Filter action object as defined in the Gmail API."
+    ),
+) -> str:
+    """
+    Creates a Gmail filter using the users.settings.filters API.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        criteria (Dict[str, Any]): Criteria for matching messages.
+        action (Dict[str, Any]): Actions to apply to matched messages.
+
+    Returns:
+        str: Confirmation message with the created filter ID.
+    """
+    logger.info("[create_gmail_filter] Invoked")
+
+    filter_body = {"criteria": criteria, "action": action}
+
+    created_filter = await asyncio.to_thread(
+        service.users()
+        .settings()
+        .filters()
+        .create(userId="me", body=filter_body)
+        .execute
+    )
+
+    filter_id = created_filter.get("id", "(unknown)")
+    return f"Filter created successfully!\nFilter ID: {filter_id}"
+
+
+@server.tool()
+@handle_http_errors("delete_gmail_filter", service_type="gmail")
+@require_google_service("gmail", "gmail_settings_basic")
+async def delete_gmail_filter(
+    service,
+    user_google_email: str,
+    filter_id: str = Field(..., description="ID of the filter to delete."),
+) -> str:
+    """
+    Deletes a Gmail filter by ID.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        filter_id (str): The ID of the filter to delete.
+
+    Returns:
+        str: Confirmation message for the deletion.
+    """
+    logger.info(f"[delete_gmail_filter] Invoked. Filter ID: '{filter_id}'")
+
+    filter_details = await asyncio.to_thread(
+        service.users().settings().filters().get(userId="me", id=filter_id).execute
+    )
+
+    await asyncio.to_thread(
+        service.users().settings().filters().delete(userId="me", id=filter_id).execute
+    )
+
+    criteria = filter_details.get("criteria", {})
+    action = filter_details.get("action", {})
+
+    return (
+        "Filter deleted successfully!\n"
+        f"Filter ID: {filter_id}\n"
+        f"Criteria: {criteria or '(none)'}\n"
+        f"Action: {action or '(none)'}"
+    )
+
+
+@server.tool()
 @handle_http_errors("modify_gmail_message_labels", service_type="gmail")
 @require_google_service("gmail", GMAIL_MODIFY_SCOPE)
 async def modify_gmail_message_labels(
     service,
     user_google_email: str,
     message_id: str,
-    add_label_ids: List[str] = Field(default=[], description="Label IDs to add to the message."),
-    remove_label_ids: List[str] = Field(default=[], description="Label IDs to remove from the message."),
+    add_label_ids: List[str] = Field(
+        default=[], description="Label IDs to add to the message."
+    ),
+    remove_label_ids: List[str] = Field(
+        default=[], description="Label IDs to remove from the message."
+    ),
 ) -> str:
     """
     Adds or removes labels from a Gmail message.
@@ -1312,8 +1712,12 @@ async def batch_modify_gmail_message_labels(
     service,
     user_google_email: str,
     message_ids: List[str],
-    add_label_ids: List[str] = Field(default=[], description="Label IDs to add to messages."),
-    remove_label_ids: List[str] = Field(default=[], description="Label IDs to remove from messages."),
+    add_label_ids: List[str] = Field(
+        default=[], description="Label IDs to add to messages."
+    ),
+    remove_label_ids: List[str] = Field(
+        default=[], description="Label IDs to remove from messages."
+    ),
 ) -> str:
     """
     Adds or removes labels from multiple Gmail messages in a single batch request.
