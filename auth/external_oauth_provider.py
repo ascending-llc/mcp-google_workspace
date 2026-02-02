@@ -9,6 +9,7 @@ Google's Authorization Server but does not issue tokens itself.
 """
 
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Google's OAuth 2.0 Authorization Server
 GOOGLE_ISSUER_URL = "https://accounts.google.com"
+
+# Configurable session time in seconds (default: 1 hour)
+SESSION_TIME = int(os.getenv("SESSION_TIME", "3600"))
 
 
 class ExternalOAuthProvider(GoogleProvider):
@@ -81,7 +85,7 @@ class ExternalOAuthProvider(GoogleProvider):
                     token_uri="https://oauth2.googleapis.com/token",
                     client_id=self._client_id,
                     client_secret=self._client_secret,
-                    expiry=datetime.utcnow() + timedelta(hours=1),
+                    expiry=datetime.utcnow() + timedelta(seconds=SESSION_TIME),
                 )
 
                 # Validate token by calling userinfo API
@@ -97,7 +101,7 @@ class ExternalOAuthProvider(GoogleProvider):
                     access_token = WorkspaceAccessToken(
                         token=token,
                         scopes=scope_list,
-                        expires_at=int(time.time()) + 3600,
+                        expires_at=int(time.time()) + SESSION_TIME,
                         claims={
                             "email": user_info["email"],
                             "sub": user_info.get("id"),
