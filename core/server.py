@@ -362,12 +362,13 @@ def configure_server_for_http():
                     resource_server_url=config.get_oauth_base_url(),
                 )
                 server.auth = provider
-                
-                logger.info(
-                    "OAuth 2.1 enabled with EXTERNAL provider mode"
-                )
+
+                logger.info("OAuth 2.1 enabled with EXTERNAL provider mode")
                 logger.info(
                     "Expecting Authorization bearer tokens in tool call headers"
+                )
+                logger.info(
+                    "Protected resource metadata points to Google's authorization server"
                 )
                 logger.info(
                     "Protected resource metadata points to Google's authorization server"
