@@ -10,8 +10,10 @@ Google's Authorization Server but does not issue tokens itself.
 
 import logging
 import time
+from datetime import datetime, timedelta
 from typing import Optional
 
+import requests
 from starlette.routing import Route
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth import AccessToken
@@ -73,12 +75,33 @@ class ExternalOAuthProvider(GoogleProvider):
             try:
                 from auth.google_auth import get_user_info
 
+                # Query Google's tokeninfo endpoint to get actual expiry
+                expires_in = 3600  # default fallback
+                try:
+                    tokeninfo_resp = requests.get(
+                        "https://oauth2.googleapis.com/tokeninfo",
+                        params={"access_token": token},
+                        timeout=5,
+                    )
+                    if tokeninfo_resp.status_code == 200:
+                        tokeninfo = tokeninfo_resp.json()
+                        expires_in = int(tokeninfo.get("expires_in"))
+                        logger.info(f"Token expires in {expires_in} seconds")
+                    else:
+                        logger.debug(
+                            f"tokeninfo returned {tokeninfo_resp.status_code}, using default expiry"
+                        )
+                except Exception as e:
+                    logger.debug(f"Could not fetch tokeninfo: {e}, using default expiry")
+
                 # Create minimal Credentials object for userinfo API call
+                # expiry must be set so credentials.valid returns True
                 credentials = Credentials(
                     token=token,
                     token_uri="https://oauth2.googleapis.com/token",
                     client_id=self._client_id,
                     client_secret=self._client_secret,
+                    expiry=datetime.utcnow() + timedelta(seconds=expires_in),
                 )
 
                 # Validate token by calling userinfo API
@@ -94,8 +117,7 @@ class ExternalOAuthProvider(GoogleProvider):
                     access_token = WorkspaceAccessToken(
                         token=token,
                         scopes=scope_list,
-                        expires_at=int(time.time())
-                        + 3600,  # Default to 1-hour validity
+                        expires_at=int(time.time()) + expires_in,
                         claims={
                             "email": user_info["email"],
                             "sub": user_info.get("id"),
