@@ -4,7 +4,6 @@ Authentication middleware to populate context state with user information
 
 import jwt
 import logging
-import time
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.dependencies import get_http_headers
@@ -100,11 +99,19 @@ class AuthInfoMiddleware(Middleware):
                                     )
                                     if verified_auth:
                                         # Extract user email from verified token
-                                        user_email = getattr(verified_auth, "email", None)
-                                        if not user_email and hasattr(verified_auth, "claims"):
-                                            user_email = verified_auth.claims.get("email")
+                                        user_email = getattr(
+                                            verified_auth, "email", None
+                                        )
+                                        if not user_email and hasattr(
+                                            verified_auth, "claims"
+                                        ):
+                                            user_email = verified_auth.claims.get(
+                                                "email"
+                                            )
 
-                                        if isinstance(verified_auth, WorkspaceAccessToken):
+                                        if isinstance(
+                                            verified_auth, WorkspaceAccessToken
+                                        ):
                                             # ExternalOAuthProvider returns a fully-formed WorkspaceAccessToken
                                             access_token = verified_auth
                                         else:
@@ -112,12 +119,24 @@ class AuthInfoMiddleware(Middleware):
                                             # wrap it in WorkspaceAccessToken for identical downstream handling
                                             access_token = WorkspaceAccessToken(
                                                 token=token_str,
-                                                client_id=getattr(verified_auth, "client_id", None) or "google",
-                                                scopes=getattr(verified_auth, "scopes", []) or [],
+                                                client_id=getattr(
+                                                    verified_auth, "client_id", None
+                                                )
+                                                or "google",
+                                                scopes=getattr(
+                                                    verified_auth, "scopes", []
+                                                )
+                                                or [],
                                                 session_id=f"google_oauth_{token_str[:8]}",
-                                                expires_at=getattr(verified_auth, "expires_at"),
-                                                claims=getattr(verified_auth, "claims", {}) or {},
-                                                sub=getattr(verified_auth, "sub", None) or user_email,
+                                                expires_at=getattr(
+                                                    verified_auth, "expires_at"
+                                                ),
+                                                claims=getattr(
+                                                    verified_auth, "claims", {}
+                                                )
+                                                or {},
+                                                sub=getattr(verified_auth, "sub", None)
+                                                or user_email,
                                                 email=user_email,
                                             )
 
